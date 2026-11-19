@@ -12,7 +12,7 @@
       "binding": "DB",
       "database_name": "getaway-scores",
       // VAIHDA TÄHÄN oman D1-tietokantasi Database ID (Cloudflare → Storage & Databases → D1)
-      "database_id": "LIITA-TAHAN-DATABASE-ID"
+      "database_id": "a7f01ee9-bda2-4216-8303-6e6e9fe4a9ca"
     }
   ]
 }
