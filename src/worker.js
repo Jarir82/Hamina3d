@@ -7,7 +7,10 @@ async function init(db) {
   await db.batch([
     db.prepare('CREATE TABLE IF NOT EXISTS scores (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, secs REAL NOT NULL, created INTEGER NOT NULL)'),
     db.prepare('CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, started INTEGER NOT NULL, ip TEXT, used INTEGER NOT NULL DEFAULT 0)'),
-    db.prepare('CREATE INDEX IF NOT EXISTS scores_secs ON scores (secs DESC)')
+    db.prepare('CREATE INDEX IF NOT EXISTS scores_secs ON scores (secs DESC)'),
+    // Kierrosajat: pienin aika paras, oma taulukko reitin ja kulkuneuvon mukaan
+    db.prepare('CREATE TABLE IF NOT EXISTS laps (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, secs REAL NOT NULL, created INTEGER NOT NULL, veh TEXT NOT NULL, route TEXT NOT NULL)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS laps_route ON laps (route, veh, secs)')
   ]);
   // Kulkuneuvokohtaiset taulukot: vanhat tulokset kuuluvat autolle
   try { await db.prepare("ALTER TABLE scores ADD COLUMN veh TEXT NOT NULL DEFAULT 'auto'").run(); } catch (e) { /* sarake on jo olemassa */ }
@@ -17,6 +20,9 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), { status
 const TOP = 'SELECT name, MAX(secs) AS secs FROM scores WHERE veh = ? GROUP BY lower(name) ORDER BY secs DESC LIMIT 10';
 const VEHS = ['auto', 'mopo'];
 const vehOf = v => VEHS.includes(v) ? v : 'auto';
+const LAP_TOP = 'SELECT name, MIN(secs) AS secs FROM laps WHERE veh = ? AND route = ? GROUP BY lower(name) ORDER BY secs ASC LIMIT 10';
+const ROUTES = { keskusta: 25, iso: 30 };                 // reitti → nopein uskottava kierrosaika (s)
+const routeOf = r => Object.hasOwn(ROUTES, r) ? r : null;
 const BAD = /(vittu|perkele|saatana|helvetti|paska|huora|homo|neeke|fuck|shit|nigg|cunt)/i;
 
 export default {
@@ -34,10 +40,37 @@ export default {
         return json({ top: results });
       }
 
+      if (url.pathname === '/api/laps' && request.method === 'GET') {
+        const route = routeOf(url.searchParams.get('route')); if (!route) return json({ error: 'tuntematon reitti' }, 400);
+        const { results } = await env.DB.prepare(LAP_TOP).bind(vehOf(url.searchParams.get('veh')), route).all();
+        return json({ top: results });
+      }
+
+      if (url.pathname === '/api/lap' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const name = String(body.name || '').replace(/[^\p{L}\p{N} _.\-!?]/gu, '').trim().slice(0, 16);
+        const secs = Number(body.secs), veh = vehOf(body.veh), route = routeOf(body.route);
+        if (!route) return json({ error: 'tuntematon reitti' }, 400);
+        if (!name) return json({ error: 'nimimerkki puuttuu' }, 400);
+        if (BAD.test(name)) return json({ error: 'valitse toinen nimimerkki' }, 400);
+        if (!Number.isFinite(secs) || secs < ROUTES[route] || secs > 1800) return json({ error: 'virheellinen aika' }, 400);
+        const rs = Math.round(secs * 10) / 10;
+        const run = await env.DB.prepare('SELECT started, used FROM runs WHERE id = ?').bind(String(body.run || '')).first();
+        if (!run || run.used) return json({ error: 'kierros ei kelpaa (aja uusi kierros)' }, 400);
+        if (secs * 1000 > now - run.started + 3000) return json({ error: 'aika ei täsmää' }, 400);
+        await env.DB.batch([
+          env.DB.prepare('UPDATE runs SET used = 1 WHERE id = ?').bind(String(body.run)),
+          env.DB.prepare('INSERT INTO laps (name, secs, created, veh, route) VALUES (?, ?, ?, ?, ?)').bind(name, rs, now, veh, route)
+        ]);
+        const better = await env.DB.prepare('SELECT COUNT(*) AS n FROM (SELECT MIN(secs) AS s FROM laps WHERE veh = ? AND route = ? GROUP BY lower(name)) WHERE s < ?').bind(veh, route, rs).first();
+        const { results } = await env.DB.prepare(LAP_TOP).bind(veh, route).all();
+        return json({ rank: (better ? better.n : 0) + 1, top: results });
+      }
+
       if (url.pathname === '/api/start' && request.method === 'POST') {
-        // Rajoitus: enintään 30 aloitusta per IP tunnissa
+        // Rajoitus: enintään 80 aloitusta per IP tunnissa (jahdit ja kierrokset)
         const c = await env.DB.prepare('SELECT COUNT(*) AS n FROM runs WHERE ip = ? AND started > ?').bind(ip, now - 3600e3).first();
-        if (c && c.n > 30) return json({ error: 'liian monta yritystä, odota hetki' }, 429);
+        if (c && c.n > 80) return json({ error: 'liian monta yritystä, odota hetki' }, 429);
         const id = crypto.randomUUID();
         await env.DB.prepare('INSERT INTO runs (id, started, ip) VALUES (?, ?, ?)').bind(id, now, ip).run();
         if (Math.random() < 0.05) await env.DB.prepare('DELETE FROM runs WHERE started < ?').bind(now - 86400e3).run();
