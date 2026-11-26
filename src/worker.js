@@ -10,7 +10,10 @@ async function init(db) {
     db.prepare('CREATE INDEX IF NOT EXISTS scores_secs ON scores (secs DESC)'),
     // Kierrosajat: pienin aika paras, oma taulukko reitin ja kulkuneuvon mukaan
     db.prepare('CREATE TABLE IF NOT EXISTS laps (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, secs REAL NOT NULL, created INTEGER NOT NULL, veh TEXT NOT NULL, route TEXT NOT NULL)'),
-    db.prepare('CREATE INDEX IF NOT EXISTS laps_route ON laps (route, veh, secs)')
+    db.prepare('CREATE INDEX IF NOT EXISTS laps_route ON laps (route, veh, secs)'),
+    // Drifteri: eniten pisteitä paras
+    db.prepare('CREATE TABLE IF NOT EXISTS drifts (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, score INTEGER NOT NULL, created INTEGER NOT NULL)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS drifts_score ON drifts (score DESC)')
   ]);
   // Kulkuneuvokohtaiset taulukot: vanhat tulokset kuuluvat autolle
   try { await db.prepare("ALTER TABLE scores ADD COLUMN veh TEXT NOT NULL DEFAULT 'auto'").run(); } catch (e) { /* sarake on jo olemassa */ }
@@ -21,6 +24,7 @@ const TOP = 'SELECT name, MAX(secs) AS secs FROM scores WHERE veh = ? GROUP BY l
 const VEHS = ['auto', 'mopo'];
 const vehOf = v => VEHS.includes(v) ? v : 'auto';
 const LAP_TOP = 'SELECT name, MIN(secs) AS secs FROM laps WHERE veh = ? AND route = ? GROUP BY lower(name) ORDER BY secs ASC LIMIT 10';
+const DRIFT_TOP = 'SELECT name, MAX(score) AS secs FROM drifts GROUP BY lower(name) ORDER BY secs DESC LIMIT 10';
 const ROUTES = { keskusta: 25, iso: 30 };                 // reitti → nopein uskottava kierrosaika (s)
 const routeOf = r => Object.hasOwn(ROUTES, r) ? r : null;
 const BAD = /(vittu|perkele|saatana|helvetti|paska|huora|homo|neeke|fuck|shit|nigg|cunt)/i;
@@ -64,6 +68,30 @@ export default {
         ]);
         const better = await env.DB.prepare('SELECT COUNT(*) AS n FROM (SELECT MIN(secs) AS s FROM laps WHERE veh = ? AND route = ? GROUP BY lower(name)) WHERE s < ?').bind(veh, route, rs).first();
         const { results } = await env.DB.prepare(LAP_TOP).bind(veh, route).all();
+        return json({ rank: (better ? better.n : 0) + 1, top: results });
+      }
+
+      if (url.pathname === '/api/drifts' && request.method === 'GET') {
+        const { results } = await env.DB.prepare(DRIFT_TOP).all();
+        return json({ top: results });
+      }
+
+      if (url.pathname === '/api/drift' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
+        const name = String(body.name || '').replace(/[^\p{L}\p{N} _.\-!?]/gu, '').trim().slice(0, 16);
+        const score = Math.round(Number(body.score));
+        if (!name) return json({ error: 'nimimerkki puuttuu' }, 400);
+        if (BAD.test(name)) return json({ error: 'valitse toinen nimimerkki' }, 400);
+        if (!Number.isFinite(score) || score < 100 || score > 400000) return json({ error: 'virheelliset pisteet' }, 400);
+        const run = await env.DB.prepare('SELECT started, used FROM runs WHERE id = ?').bind(String(body.run || '')).first();
+        if (!run || run.used) return json({ error: 'ajo ei kelpaa (aloita uusi ajo)' }, 400);
+        if (now - run.started < 110e3) return json({ error: 'aika ei täsmää' }, 400);   // ajo kestää 2 min + lähtölaskenta
+        await env.DB.batch([
+          env.DB.prepare('UPDATE runs SET used = 1 WHERE id = ?').bind(String(body.run)),
+          env.DB.prepare('INSERT INTO drifts (name, score, created) VALUES (?, ?, ?)').bind(name, score, now)
+        ]);
+        const better = await env.DB.prepare('SELECT COUNT(*) AS n FROM (SELECT MAX(score) AS s FROM drifts GROUP BY lower(name)) WHERE s > ?').bind(score).first();
+        const { results } = await env.DB.prepare(DRIFT_TOP).all();
         return json({ rank: (better ? better.n : 0) + 1, top: results });
       }
 
