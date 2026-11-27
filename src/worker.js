@@ -85,7 +85,7 @@ export default {
         if (!Number.isFinite(score) || score < 100 || score > 400000) return json({ error: 'virheelliset pisteet' }, 400);
         const run = await env.DB.prepare('SELECT started, used FROM runs WHERE id = ?').bind(String(body.run || '')).first();
         if (!run || run.used) return json({ error: 'ajo ei kelpaa (aloita uusi ajo)' }, 400);
-        if (now - run.started < 110e3) return json({ error: 'aika ei täsmää' }, 400);   // ajo kestää 2 min + lähtölaskenta
+        if (now - run.started < 75e3) return json({ error: 'aika ei täsmää' }, 400);   // ajo kestää 80 s + lähtölaskenta
         await env.DB.batch([
           env.DB.prepare('UPDATE runs SET used = 1 WHERE id = ?').bind(String(body.run)),
           env.DB.prepare('INSERT INTO drifts (name, score, created) VALUES (?, ?, ?)').bind(name, score, now)
